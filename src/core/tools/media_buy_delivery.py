@@ -40,7 +40,7 @@ from src.core.validation_helpers import format_validation_error
 
 
 def _get_media_buy_delivery_impl(
-    req: GetMediaBuyDeliveryRequest, context: Context | ToolContext | None
+    req: GetMediaBuyDeliveryRequest, ctx: Context | ToolContext | None
 ) -> GetMediaBuyDeliveryResponse:
     """Get delivery data for one or more media buys.
 
@@ -49,13 +49,13 @@ def _get_media_buy_delivery_impl(
     """
 
     # Validate context is provided
-    if context is None:
+    if ctx is None:
         raise ToolError("Context is required")
 
     # Extract testing context for time simulation and event jumping
-    testing_ctx = get_testing_context(context)
+    testing_ctx = get_testing_context(ctx)
 
-    principal_id = get_principal_id_from_context(context)
+    principal_id = get_principal_id_from_context(ctx)
     if not principal_id:
         # Return AdCP-compliant error response
         return GetMediaBuyDeliveryResponse(
@@ -224,7 +224,7 @@ def _get_media_buy_delivery_impl(
             else:
                 status = "active"
 
-            # Get real delivery metrics from adapter (if not in testing mode)
+            # Get delivery metrics from adapter
             adapter_package_metrics = {}  # Map package_id -> {impressions, spend, clicks}
             total_spend_from_adapter = 0.0
             total_impressions_from_adapter = 0
@@ -347,6 +347,27 @@ def _get_media_buy_delivery_impl(
                         )
                     )
 
+            # Create package delivery data
+            package_deliveries = []
+            if buy.raw_request and isinstance(buy.raw_request, dict) and "product_ids" in buy.raw_request:
+                product_ids = buy.raw_request.get("product_ids", [])
+                for i, product_id in enumerate(product_ids):
+                    package_spend = spend / len(product_ids) if product_ids else spend
+                    package_impressions = impressions / len(product_ids) if product_ids else impressions
+
+                    package_deliveries.append(
+                        PackageDelivery(
+                            package_id=f"pkg_{product_id}_{i}",
+                            buyer_ref=buy.raw_request.get("buyer_ref", None),
+                            impressions=package_impressions,
+                            spend=package_spend,
+                            # TODO: Calculate clicks for CPC pricing - extract pricing model from raw_request
+                            clicks=None,  # Optional field, not calculated in this implementation
+                            video_completions=None,  # Optional field, not calculated in this implementation
+                            pacing_index=1.0 if status == "active" else 0.0,
+                        )
+                    )
+
             # Create delivery data
             buyer_ref = buy.raw_request.get("buyer_ref", None) if buy.raw_request else None
             # Type cast status to match Literal type
@@ -392,6 +413,7 @@ def _get_media_buy_delivery_impl(
             "media_buy_count": media_buy_count,
         },
         media_buy_deliveries=deliveries,
+        context=req.context or None,
     )
 
     # Apply testing hooks if needed
@@ -459,6 +481,7 @@ def _get_media_buy_delivery_impl(
             sequence_number=filtered_data.get("sequence_number"),
             next_expected_at=filtered_data.get("next_expected_at"),
             errors=filtered_data.get("errors"),
+            context=req.context or None,
         )
 
     return response
@@ -470,9 +493,10 @@ def get_media_buy_delivery(
     status_filter: str | None = None,
     start_date: str | None = None,
     end_date: str | None = None,
+    context: dict | None = None, # Application level context per adcp spec
     webhook_url: str | None = None,
     push_notification_config: PushNotificationConfig | None = None,
-    context: Context | ToolContext | None = None,
+    ctx: Context | ToolContext | None = None,
 ):
     """Get delivery data for media buys.
 
@@ -486,7 +510,8 @@ def get_media_buy_delivery(
         end_date: End date for reporting period in YYYY-MM-DD format (optional)
         webhook_url: URL for async task completion notifications (AdCP spec, optional)
         push_notification_config: Optional webhook configuration (accepted, ignored by this operation)
-        context: FastMCP context (automatically provided)
+        context: Application level context per adcp spec
+        ctx: FastMCP context (automatically provided)
 
     Returns:
         ToolResult with GetMediaBuyDeliveryResponse data
@@ -500,11 +525,12 @@ def get_media_buy_delivery(
             start_date=start_date,
             end_date=end_date,
             push_notification_config=push_notification_config,
+            context=context,
         )
     except ValidationError as e:
         raise ToolError(format_validation_error(e, context="get_media_buy_delivery request")) from e
 
-    response = _get_media_buy_delivery_impl(req, context)
+    response = _get_media_buy_delivery_impl(req, ctx)
     return ToolResult(content=str(response), structured_content=response.model_dump())
 
 
@@ -514,7 +540,8 @@ def get_media_buy_delivery_raw(
     status_filter: str | None = None,
     start_date: str | None = None,
     end_date: str | None = None,
-    context: Context | ToolContext | None = None,
+    context: dict | None = None, # Application level context per adcp spec
+    ctx: Context | ToolContext | None = None,
 ):
     """Get delivery metrics for media buys (raw function for A2A server use).
 
@@ -539,10 +566,11 @@ def get_media_buy_delivery_raw(
         start_date=start_date,
         end_date=end_date,
         push_notification_config=None,
+        context=context,
     )
 
     # Call the implementation
-    return _get_media_buy_delivery_impl(req, context)
+    return _get_media_buy_delivery_impl(req, ctx)
 
 
 # --- Admin Tools ---
